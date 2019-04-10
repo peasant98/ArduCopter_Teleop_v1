@@ -8,6 +8,11 @@
 #include <assert.h>
 #include <string.h>
 #include <signal.h>
+
+
+#include <bits/stdc++.h> 
+
+
 #include <mavros_msgs/CommandBool.h>
 #include <mavros_msgs/CommandTOL.h>
 #include <mavros_msgs/SetMode.h>
@@ -20,19 +25,22 @@
 #include "sensor_msgs/NavSatStatus.h"
 #include "mavros_msgs/StreamRate.h"
 #include "mavros_msgs/ParamSet.h"
+#include "mavros_msgs/GlobalPositionTarget.h"
+
 // v2 of the udana hawk flight controller
 
 // allows the user to realtime control the drone via simple keyboard inputs
+
+
+
 #define RATE 5
 
-#define UP_Y 119
-#define DOWN_Y 115
-#define UP_X 100
-#define DOWN_X 97
-#define UP_Z 111
-#define DOWN_Z 108
-#define EXIT 120
 
+#define PUB_SIZE 50
+
+
+#define EARTH_RADIUS 6371
+#define EUC_THRESHOLD 3
 
 // another thread for time
 
@@ -41,19 +49,27 @@ int timer;
 bool init = false;
 double difference = 0.0f;
 double starting_altitude = 0.0f;
-void control_menu();
+
+double user_latitude, user_longitude, user_new_height;
+
+int control_menu(double *latitude, double * longitude, double * new_height);
+double gps_distance(double lat1, double long1, double lat2, double long2);
+double deg_to_rad(const double degrees);
+bool euc_2d_dist(const double x, const double y, const double thresh);
+
+
+
+bool gps_range = false;
 void leave(int sig);
 int getch();
 
 void stateCallback(const sensor_msgs::Imu::ConstPtr& msg){
     auto s = msg->linear_acceleration.z;
     //ROS_INFO("The linear acceleration is now: [%f]", s);
-    // do stuff here
-
 }
 
 
-void heightCallback(const sensor_msgs::NavSatFix::ConstPtr& msg){
+void gpsCallback(const sensor_msgs::NavSatFix::ConstPtr& msg){
     if(!init){
         starting_altitude = msg->altitude;
         init = true;
@@ -63,6 +79,12 @@ void heightCallback(const sensor_msgs::NavSatFix::ConstPtr& msg){
         difference  = msg->altitude - starting_altitude;
     }
     ROS_INFO("%lf is height", difference);
+    ROS_INFO("%lf is the latitude", msg->latitude);
+    ROS_INFO("%lf is the longitude", msg->longitude);
+    const double dist = gps_distance(user_latitude, user_longitude, msg->latitude, msg->longitude);
+    const double user_dist = user_new_height - difference; 
+    gps_range = euc_2d_dist(dist, user_dist, EUC_THRESHOLD);
+
 }
 
 
@@ -76,7 +98,10 @@ int main(int argc, char**argv){
     signal(SIGINT,leave);
     // get the subscriber here to call the callback
     ros::Subscriber sb = nh.subscribe<sensor_msgs::Imu>("/mavros/imu/data", 100, stateCallback);
-    ros::Subscriber sub = nh.subscribe<sensor_msgs::NavSatFix>("/mavros/global_position/global", 1, heightCallback);
+    ros::Subscriber sub = nh.subscribe<sensor_msgs::NavSatFix>("/mavros/global_position/global", 1, gpsCallback);
+
+    
+
 
     ros::ServiceClient stream_cl = nh.serviceClient<mavros_msgs::StreamRate>("/mavros/set_stream_rate");
 
@@ -106,11 +131,8 @@ int main(int argc, char**argv){
         // do stuff
 
     }
-    
     // wait here some amount of time before arming and switching the modes
     // of the arducopter, need to pass all test cases before we can arm
-
-    ros::Duration(20).sleep();
     // 20 seconds pause...
     int input;
     double height;
@@ -131,9 +153,8 @@ int main(int argc, char**argv){
         getchar();
     }
 
-
     while(1){
-        printf("Enter height of takeoff: ");
+        printf("Enter height of takeoff before GPS flight: ");
         scanf("%lf", &height);
         if(height>=0){
             getchar();
@@ -145,7 +166,6 @@ int main(int argc, char**argv){
     
     // get desired height of takeoff.
     // getting into guided mode....
-    // checks?
 
     ros::ServiceClient scl = nh.serviceClient<mavros_msgs::SetMode>("/mavros/set_mode");
     // get the client // getting into guided mode....
@@ -166,7 +186,7 @@ int main(int argc, char**argv){
 
     }
 
-    ros::Duration(2).sleep();
+    ros::Duration(1.5).sleep();
 
     // arm the drone, assuming that the pre arm checks passed.
     ros::ServiceClient arm_scl = nh.serviceClient<mavros_msgs::CommandBool>("/mavros/cmd/arming");
@@ -183,7 +203,7 @@ int main(int argc, char**argv){
 
     }
 
-    ros::Duration(2).sleep();
+    ros::Duration(1).sleep();
     // once in guided mode, take the previous user input
     // to get to the desired height
 
@@ -208,21 +228,62 @@ int main(int argc, char**argv){
         ros::spinOnce();
         if(abs(height - difference) <= 0.125){
             // within acceptable height in the z axis.
-            ROS_INFO("At the desired setpoint!");
+            ROS_INFO("At the desired height!");
             // exiting now that we are at the correct height
 
-            ros::Duration(2).sleep();
+            ros::Duration(1).sleep();
             break;
 
         }
         r.sleep();
     }
-
-
     // take time to get to the stop.
-    
-    control_menu();
+    ros::Publisher gps_pub = nh.advertise<mavros_msgs::GlobalPositionTarget>("/mavros/setpoint_raw/global", PUB_SIZE);
 
+
+    mavros_msgs::GlobalPositionTarget gps_target;
+
+    gps_target.header.seq = 1;
+    gps_target.header.frame_id = "";
+    gps_target.header.stamp = ros::Time::now();
+    gps_target.coordinate_frame = 3;
+    gps_target.type_mask = 504;
+    gps_target.yaw = 0.0f;
+    while(1){
+        if(control_menu(&user_latitude, &user_longitude, &user_new_height)){
+            gps_target.latitude = user_latitude;
+            gps_target.longitude = user_longitude;
+            gps_target.altitude = user_new_height;
+
+            gps_pub.publish(gps_target);
+            gps_target.header.seq++;
+            auto now = ros::Time::now();
+            while(ros::ok()){
+                ros::spinOnce();
+                if(gps_range){
+                // within acceptable height in the z axis.
+                    ROS_INFO("At the desired height and gps coordinates!");
+                    // exiting now that we are at the correct height
+
+                    ros::Duration(1).sleep();
+                    break;
+                }
+            r.sleep();
+            }
+            gps_range = false;
+            // at the desired point
+        }
+        else{
+            break;
+        }
+        
+    }
+
+    // default yaw in this case.
+    // correct header that will enable mavlink messages to be sent.
+
+    /*
+    
     ros::Publisher simple_vel_pub = nh.advertise<geometry_msgs::TwistStamped>("/mavros/setpoint_velocity/cmd_vel", 50);
     geometry_msgs::TwistStamped twister;
     twister.header.stamp = ros::Time::now();
@@ -235,58 +296,8 @@ int main(int argc, char**argv){
     twister.twist.linear.y = 0;
     twister.twist.linear.z = 0;
 
+    */
 
-    while(1){
-        // show the menu
-        int x = getch();
-        // uncomment to see what is printed
-        // putchar(x);
-        
-        if(x == EXIT){
-            twister.twist.linear.x = 0;
-            twister.twist.linear.y = 0;
-            twister.twist.linear.z = 0;
-            simple_vel_pub.publish(twister);
-            ros::Duration(1).sleep();
-            break;
-        }
-        switch(x){
-            case UP_Y:
-                //printf("y+");
-                twister.twist.linear.y+=0.5;
-                // increase y velocity
-                break;
-            case DOWN_Y:
-                //printf("y-");
-                twister.twist.linear.y-=0.5;
-                // decrease y velocity
-                break;
-            case UP_X:
-                //printf("x+");
-                twister.twist.linear.x+=0.5;
-                // increase x velocity
-                break;
-            case DOWN_X:
-                //printf("x-");
-                twister.twist.linear.x-=0.5;
-                // decrease x velocity
-                break;
-            case UP_Z:
-                //printf("z+");
-                twister.twist.linear.z+=0.5;
-                // increase z velocity
-                break;
-            case DOWN_Z:
-                //printf("z-");
-                twister.twist.linear.z-=0.5;
-                // decrease z velocity
-                break;
-        }
-        simple_vel_pub.publish(twister);
-        ros::spinOnce();
-        r.sleep();
-        // get the user input
-    }
 
     ROS_INFO("Udana HAWK about to land...");
     mavros_msgs::SetMode set_mode_service_land;
@@ -326,33 +337,27 @@ int main(int argc, char**argv){
     // keep waiting until user desires to end 
     return 0;
 
-
-
-
-
     // once the drone is at its spot
     // we'll need to use some kind of subscriber to check a drone's location here:
 
-    // subscriber code:
-
-
-    // now, drone is flying in the air and we can give it commands as we please.
-}
-
-void control_menu(){
-    printf("Udana HAWK Main Controls:\n");
-    printf("w - increase y velocity\n");
-    printf("s - decrease y veloity\n");
-    printf("d - increase x velocity\n");
-    printf("a - decrease x velocity\n");
-    printf("o - increase z velocity\n");
-    printf("l - decrease z velocity\n");
-    printf("x - go into landing mode, and end the mission. \n");
-    printf("Enter: ");
 }
 
 
+int control_menu(double *latitude, double * longitude, double * new_height){
+    printf("Please enter a new height to go to (or -1 to exit):\n");
+    scanf("%lf", new_height);
+    if(*new_height == -1){
+        return 0;
 
+    }
+    printf("Please enter a GPS latitude: \n");
+    scanf("%lf", latitude);
+    printf("Please enter a GPS longitude: \n");  
+    scanf("%lf", longitude);
+    return 1;
+    
+
+}
 
 int getch(void) {
       int c=0;
@@ -374,9 +379,34 @@ int getch(void) {
 }
 
 
-
 void leave(int sig)
 {
-    printf("Shutting down node...");
+    printf("Shutting down node...\n");
     exit(0);
 }
+
+
+double deg_to_rad(const double degrees){
+    double one_degree = (M_PI) / 180;
+    return (one_degree * degrees);
+}
+
+double gps_distance(double lat1, double long1, double lat2, double long2){
+    lat1 = deg_to_rad(lat1);
+    long1 = deg_to_rad(long1);
+    lat2 = deg_to_rad(lat2);
+    long2 = deg_to_rad(long2);
+    double lat_diff = lat2 - lat1;
+    double long_diff = long2 - long2; 
+    double ans = pow(sin(lat_diff / 2), 2) + cos(lat1) * cos(lat2) *  pow(sin(long_diff / 2), 2); 
+    ans = 2 * asin(sqrt(ans));
+    ans = ans * EARTH_RADIUS * 1000;
+    return ans;
+    // answer in meters
+
+}
+bool euc_2d_dist(const double x, const double y, const double thresh){
+    return sqrt(pow(x,2) + pow(y,2)) <= thresh;
+}
+
+
