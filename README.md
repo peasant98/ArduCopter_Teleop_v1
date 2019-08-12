@@ -1,4 +1,4 @@
-# ArduCopter Teleoperations with ROS, V1 
+# ArduCopter Teleoperations with ROS, Version 1.0
 
 
 
