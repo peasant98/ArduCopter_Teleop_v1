@@ -3,7 +3,7 @@
 
 
 **Code**:
- - A brief package written in C++ built for Arducopter quadcopters
+ - A brief package written in C++ built for Arducopter.
  - Allows user input instead of a traditional RC transmitter with Mavros underneath
 
 
