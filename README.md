@@ -9,6 +9,6 @@
 
 **Quick Start**:
 - ROS should be installed, and you first need to create a catkin workspace.
-- Make sure that this package is within the `src/` folder of your catkin workspace, and simply do `catkin_make`.
+- Make sure that this package is within the `src/` folder of your catkin workspace, and simply do `catkin_make` or `catkin build`.
 
 
